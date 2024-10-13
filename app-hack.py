@@ -21,6 +21,8 @@ from anthropic import Anthropic
 import logging
 import ast
 from gemini import GeminiDescriber
+import tempfile
+import shutil
 
 # Initialize generators and uploader
 flux_generator = FluxImageGenerator()
@@ -409,6 +411,70 @@ def stitch_new_video(video_outputs, audio_output, product_description, lora_outp
     
     return output_path
 
+def cut_and_process_b_roll_videos(b_roll_input):
+    output_dir = 'b_roll_cut'
+    os.makedirs(output_dir, exist_ok=True)
+    
+    describer = GeminiDescriber()
+    
+    cut_videos = []
+    temp_dir = None
+
+    try:
+        if isinstance(b_roll_input, list):
+            # Multiple files uploaded
+            video_paths = []
+            for file in b_roll_input:
+                if zipfile.is_zipfile(file.name):
+                    temp_dir = tempfile.mkdtemp()
+                    with zipfile.ZipFile(file.name, 'r') as zip_ref:
+                        zip_ref.extractall(temp_dir)
+                    video_paths.extend([os.path.join(temp_dir, f) for f in os.listdir(temp_dir) if f.lower().endswith(('.mp4', '.avi', '.mov'))])
+                elif file.name.lower().endswith(('.mp4', '.avi', '.mov')):
+                    video_paths.append(file.name)
+        elif zipfile.is_zipfile(b_roll_input):
+            # Single zip file uploaded
+            temp_dir = tempfile.mkdtemp()
+            with zipfile.ZipFile(b_roll_input, 'r') as zip_ref:
+                zip_ref.extractall(temp_dir)
+            video_paths = [os.path.join(temp_dir, f) for f in os.listdir(temp_dir) if f.lower().endswith(('.mp4', '.avi', '.mov'))]
+        elif isinstance(b_roll_input, str) and b_roll_input.lower().endswith(('.mp4', '.avi', '.mov')):
+            # Single video file selected from dropdown
+            video_paths = [b_roll_input]
+        else:
+            return "Error: Invalid input. Please upload video files or a zip file containing videos."
+
+        for video_path in video_paths:
+            clip = VideoFileClip(video_path)
+            duration = clip.duration
+            
+            # Random cut between 3-5 seconds
+            cut_duration = random.uniform(3, 5)
+            if duration > cut_duration:
+                start_time = random.uniform(0, duration - cut_duration)
+                cut_clip = clip.subclip(start_time, start_time + cut_duration)
+            else:
+                cut_clip = clip
+            
+            output_path = os.path.join(output_dir, f"cut_{os.path.basename(video_path)}")
+            cut_clip.write_videofile(output_path)
+            cut_videos.append(output_path)
+            
+            clip.close()
+            cut_clip.close()
+        
+        # Process cut videos with GeminiDescriber
+        describer.process_directory_sequential(output_dir)
+        
+        return f"Processed {len(cut_videos)} B-roll videos. Metadata saved in {describer.output_dir}"
+
+    except Exception as e:
+        return f"Error processing videos: {str(e)}"
+
+    finally:
+        if temp_dir:
+            shutil.rmtree(temp_dir)
+
 with gr.Blocks() as demo:
     gr.Markdown("# Auto Product Commercial")
 
@@ -453,6 +519,10 @@ with gr.Blocks() as demo:
     with gr.Row():
         b_roll_dropdown = gr.Dropdown(label="Select B-roll Video", choices=[])
         b_roll_video = gr.Video(label="Selected B-roll Video")
+    
+    # New button for indexing B-roll videos
+    index_b_roll_btn = gr.Button("Index All B-roll Videos")
+    index_b_roll_output = gr.Textbox(label="Indexing Output")
 
     # Replace audio_input with text input for song prompt
     song_prompt = gr.Textbox(label="Enter song prompt")
@@ -499,6 +569,13 @@ with gr.Blocks() as demo:
         lambda x: x,
         inputs=[b_roll_dropdown],
         outputs=[b_roll_video]
+    )
+
+    # Update the click event for the index button
+    index_b_roll_btn.click(
+        cut_and_process_b_roll_videos,
+        inputs=[b_roll_input],
+        outputs=[index_b_roll_output]
     )
 
 # make the app live
